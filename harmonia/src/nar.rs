@@ -1,10 +1,14 @@
 use std::collections::BTreeMap;
 use std::error::Error;
+use std::io::{self, Read, Write};
 use std::mem::size_of;
+use std::os::fd::IntoRawFd;
+use std::pin::Pin;
+use std::task::{ready, Context, Poll};
 
 use actix_web::web::Bytes;
 use actix_web::{http, web, HttpRequest, HttpResponse};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context as _, Result};
 use libnixstore::Radix;
 use serde::Deserialize;
 use std::fs::{self, Metadata};
@@ -13,12 +17,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use sync::mpsc::Sender;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::unix::AsyncFd;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader, ReadBuf};
 
 use crate::config::Config;
 use crate::{cache_control_max_age_1y, some_or_404};
 use std::ffi::{OsStr, OsString};
-use tokio::{sync, task};
+use tokio::{sync, task, try_join};
 
 /// Represents the query string of a NAR URL.
 #[derive(Debug, Deserialize)]
@@ -444,6 +449,104 @@ pub(crate) async fn get(
         .insert_header((http::header::ACCEPT_RANGES, "bytes"))
         .insert_header(cache_control_max_age_1y())
         .body(actix_web::body::SizedStream::new(rlength, rx)))
+}
+
+pub(crate) async fn put(
+    path: web::Path<PathParams>,
+    payload: web::Payload,
+) -> Result<HttpResponse, Box<dyn Error>> {
+    // log::info!("PUT: {:?}", path);
+    let (reader, writer) = std::os::unix::net::UnixStream::pair()?;
+    // FIXME: stream
+    let payload = payload.to_bytes().await?;
+    // println!("{}", String::from_utf8_lossy(&payload[..128]));
+    let raw_fd = reader.into_raw_fd();
+    // log::info!("PUT: {:?} {raw_fd}", payload.len());
+    let result = tokio::task::spawn_blocking(move || libnixstore::import(raw_fd, true));
+    let copy = tokio::spawn({
+        let payload = payload.clone();
+        async move {
+            anyhow::Ok(
+                tokio::io::copy_buf(
+                    &mut BufReader::with_capacity(512 * 1024, &*payload),
+                    &mut AsyncFdStream::new(writer)?,
+                )
+                .await?,
+            )
+        }
+    });
+
+    let result = try_join!(result, copy);
+
+    Ok(match result {
+        Ok((Ok(_), Ok(_))) => HttpResponse::Ok().into(),
+        _ => {
+            log::error!("Error importing nar: {:?}", result);
+            // let head = String::from_utf8_lossy(&payload[..std::cmp::min(128, payload.len())]);
+            HttpResponse::BadRequest().body(dbg!(format!("{result:?}")))
+        }
+    })
+}
+
+struct AsyncFdStream {
+    inner: AsyncFd<std::os::unix::net::UnixStream>,
+}
+
+impl AsyncFdStream {
+    pub fn new(stream: std::os::unix::net::UnixStream) -> io::Result<Self> {
+        Ok(Self {
+            inner: AsyncFd::new(stream)?,
+        })
+    }
+}
+
+impl AsyncRead for AsyncFdStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        loop {
+            let mut guard = ready!(self.inner.poll_read_ready(cx))?;
+
+            let unfilled = buf.initialize_unfilled();
+            match guard.try_io(|inner| inner.get_ref().read(unfilled)) {
+                Ok(Ok(len)) => {
+                    buf.advance(len);
+                    return Poll::Ready(Ok(()));
+                }
+                Ok(Err(err)) => return Poll::Ready(Err(err)),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+}
+
+impl AsyncWrite for AsyncFdStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        loop {
+            let mut guard = ready!(self.inner.poll_write_ready(cx))?;
+
+            match guard.try_io(|inner| inner.get_ref().write(buf)) {
+                Ok(result) => return Poll::Ready(result),
+                Err(_would_block) => continue,
+            }
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.inner.get_ref().flush()?;
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        self.inner.get_ref().shutdown(std::net::Shutdown::Write)?;
+        Poll::Ready(Ok(()))
+    }
 }
 
 #[cfg(test)]

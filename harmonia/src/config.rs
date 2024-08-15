@@ -6,7 +6,7 @@ use base64::{engine::general_purpose, Engine};
 use serde::Deserialize;
 
 fn default_bind() -> String {
-    "[::]:5000".into()
+    "[::]:5002".into()
 }
 
 fn default_workers() -> usize {

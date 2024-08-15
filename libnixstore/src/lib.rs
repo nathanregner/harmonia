@@ -52,6 +52,7 @@ mod ffi {
         fn get_real_store_dir() -> String;
         fn get_build_log(derivation_path: &str) -> Result<String>;
         fn get_nar_list(store_path: &str) -> Result<String>;
+        fn import_paths(fd: i32, check_sigs: bool) -> Result<()>;
     }
 }
 
@@ -241,4 +242,10 @@ pub fn get_build_log(derivation_path: &str) -> Option<String> {
 /// Return a JSON representation as String of the contents of a NAR (except file contents).
 pub fn get_nar_list(store_path: &str) -> Result<String, cxx::Exception> {
     ffi::get_nar_list(store_path)
+}
+
+#[inline]
+/// Return a JSON representation as String of the contents of a NAR (except file contents).
+pub fn import(fd: std::os::fd::RawFd, check_sigs: bool) -> Result<(), cxx::Exception> {
+    ffi::import_paths(fd, check_sigs)
 }

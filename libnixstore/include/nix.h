@@ -17,5 +17,6 @@ rust::String get_store_dir();
 rust::String get_real_store_dir();
 rust::String get_build_log(rust::Str derivation_path);
 rust::String get_nar_list(rust::Str store_path);
+void import_paths(int fd, bool checkSigs);
 
 } // namespace libnixstore

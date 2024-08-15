@@ -201,6 +201,16 @@ rust::String get_real_store_dir() {
     return get_store_dir();
 }
 
+void import_paths(int fd, bool checkSigs) {
+  auto store = get_store();
+  auto *fsstore = dynamic_cast<nix::LocalFSStore *>(&(*store));
+
+  if (fsstore != nullptr) {
+    nix::FdSource source(fd);
+    fsstore->importPaths(source, checkSigs ? nix::CheckSigs : nix::NoCheckSigs);
+  }
+}
+
 rust::String get_build_log(rust::Str derivation_path) {
   auto store = get_store();
   auto path = store->parseStorePath(STRING_VIEW(derivation_path));

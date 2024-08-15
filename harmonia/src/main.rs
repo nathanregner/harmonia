@@ -125,6 +125,10 @@ async fn main() -> std::io::Result<()> {
                 web::get().to(nar::get),
             )
             .route(
+                &format!("/nar/{{narhash:[{0}]{{52}}}}.nar", NIXBASE32_ALPHABET),
+                web::put().to(nar::put),
+            )
+            .route(
                 // narinfos served by nix-serve have the narhash embedded in the nar URL.
                 // While we don't do that, if nix-serve is replaced with harmonia, the old nar URLs
                 // will stay in client caches for a while - so support them anyway.
